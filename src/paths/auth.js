@@ -27,19 +27,19 @@ router.post('/login', async(req, res) => {
         })
     }
 
-    let res;
+    let apiRes;
     if(!email){
         //treat as a username login
-        res = await loginEmail();
+        apiRes = await loginEmail();
     }else{
         //treat as an email login
-        res = await loginUsername();
+        apiRes = await loginUsername();
     }
 
-    if(res.token) {
+    if(apiRes.token) {
         return res.status(200).send({
-            token: res.token, 
-            expired: res.expired
+            token: apiRes.token, 
+            expired: apiRes.expired
         })
     }
     else{
@@ -53,5 +53,22 @@ router.post('/login', async(req, res) => {
 
 const loginEmail = async() => {}
 const loginUsername = async() => {}
+
+router.post('/refresh', async(req, res) => {
+    if(!req || !req.body){
+        return res.status(400).send({
+            message: 'no refresh tokens were given'
+        })
+    }
+
+    try{
+
+    }catch(error){
+        console.error(error);
+        return res.status(500).send({
+            message: error.message
+        })
+    }
+})
 
 module.exports = router
