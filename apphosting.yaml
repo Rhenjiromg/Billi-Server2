@@ -9,3 +9,5 @@ env:
     secret: GEMINI_API_KEY
   - variable: BUCKET
     secret: BUCKET
+scripts:
+  runCommand: node index.js
