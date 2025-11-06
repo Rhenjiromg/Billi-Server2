@@ -1,0 +1,11 @@
+env:
+  - variable: SECRET
+    secret: SECRET
+  - variable: ISSUER
+    secret: ISSUER
+  - variable: AUDIENCE
+    secret: AUDIENCE
+  - variable: GEMINI_API_KEY
+    secret: GEMINI_API_KEY
+  - variable: BUCKET
+    secret: BUCKET

@@ -2,3 +2,4 @@
 .env
 
 ADMIN_CERT.json
+firebase.js
