@@ -6,7 +6,7 @@ dotenv.config();
 
 admin.initializeApp({
     credential: admin.credential.applicationDefault(),
-    storageBucket: process.env.BUCKET,       
+    storageBucket: process.env.BUCKET
   });
 
 export const db = admin.firestore();
