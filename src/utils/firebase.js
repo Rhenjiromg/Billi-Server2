@@ -4,10 +4,7 @@ import dotenv from 'dotenv';
 
 dotenv.config();
 
-admin.initializeApp({
-    credential: admin.credential.cert(serviceAccount),
-    storageBucket: process.env.BUCKET
-  });
+admin.initializeApp();
 
 export const db = admin.firestore();
 export const storage = admin.storage().bucket();
