@@ -18,7 +18,5 @@ app.get('/', (req, res) => {
     return res.status(200).send({message:  `request received at ${time}`})
 })
 
-const port = process.env.PORT ?? '8080'
-app.listen( port , () => {
-    console.log('server is online')
-})
+const port = process.env.PORT ?? 8080
+app.listen(port, "0.0.0.0", () => console.log(`up on ${port}`));
