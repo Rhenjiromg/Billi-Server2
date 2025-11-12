@@ -9,6 +9,7 @@ const { authenticate } = require("../utils/authMiddleware");
 const { requireBody } = require("../utils/middleware");
 const { db } = require("../utils/firebase");
 const { type } = require('node:os');
+const admin = require('firebase-admin');
 
 const router = express.Router();
 const upload = multer({ storage: multer.memoryStorage() });
@@ -25,14 +26,30 @@ router.post("/new-receipt",authenticate, upload.single("image"), async (req, res
         })
     }
     const result = await getVision(req.file.buffer);
-    const docRef = db.collection('receipts').doc();
-    await docRef.set({
-        belongsto: userid, 
-        createdAt: new Date().toISOString(),
-        ...result
+    const receiptRef = db.collection('receipts').doc();
+    const userRef = db.collection('users').doc(userid);
+
+    const batch = db.batch();
+
+    batch.set(receiptRef,{
+      belongsto: userid,
+      createdAt: new Date().toISOString(), 
+      ...result
     })
+
+        batch.set(
+        userRef,
+        {
+          receipts: admin.firestore.FieldValue.arrayUnion(receiptRef.id),
+          receiptCount: admin.firestore.FieldValue.increment(1),
+          updatedAt: new Date().toISOString(),
+        },
+        { merge: true }
+      );
+
+      await batch.commit();
     return res.status(200).send({
-        id: docRef.id,
+        id: receiptRef.id,
         result:result});
   } catch (err) {
     console.error(err);
@@ -64,7 +81,7 @@ Return ONLY the JSON structure.
  * 
  */
 async function getVision(image) {
-  // 1) Normalize to a Web File for upload
+  
   let webFile;
   if (typeof image === "string") {
     const data = await fs.readFile(image);
@@ -74,26 +91,26 @@ async function getVision(image) {
   } else if (image instanceof Buffer) {
     webFile = new File([image], "receipt.jpg", { type: "image/jpeg" });
   } else {
-    // File or Blob
+    
     const name = (image).name ?? "image";
     const type = (image).type || "application/octet-stream";
     webFile = new File([image], name, { type });
   }
 
-  // 2) Upload via Files API
+  
   const upload = await ai.files.upload({
     file: webFile,
     displayName: (webFile).name || "receipt",
   });
 
-  // 3) Wait until the file is fully processed and get its URI/mimeType
+  
   let fileInfo = await ai.files.get({ name: upload.name });
   while (fileInfo.state === "PROCESSING") {
     await new Promise((r) => setTimeout(r, 750));
     fileInfo = await ai.files.get({ name: upload.name });
   }
 
-  // 4) Build a multimodal prompt: text + the uploaded image (by URI)
+  
   const contents = [
     {
       role: "user",
@@ -104,7 +121,7 @@ async function getVision(image) {
     },
   ];
 
-  // 5) Generate with JSON-only output
+  
   const resp = await ai.models.generateContent({
     model: "gemini-2.0-flash",
     contents,
@@ -127,75 +144,106 @@ const textToJSON = (text) => {
     return r;
 }
 
-// GET /getallreceipts?page=1&userid=abc123
-router.get("/getallreceipts", authenticate, requireBody, async (req, res) => {
-  try {
-    const pageRaw = req.query.page ?? req.body?.page ?? 1;
-    const userid = (req.query.userid ?? req.body?.userid)?.toString().trim();
 
+router.get("/getallreceipts", authenticate, async (req, res) => {
+  try {
+    const userid = (req.query.userid || "").toString().trim();
     if (!userid) {
-      return res.status(400).send({ message: "no user id found" });
+      return res.status(400).json({ message: "no user id found" });
     }
 
-    const page = Math.max(1, parseInt(pageRaw, 10) || 1);
-    const pageSize = 20;
-    const offset = (page - 1) * pageSize;
+    
+    const userSnap = await db.collection("users").doc(userid).get();
+    if (!userSnap.exists) {
+      return res.status(404).json({ message: "user not found" });
+    }
 
-    const baseQuery = db
-      .collection("receipts")
-      .where("belongsto", "==", userid);
+    
+    const userData = userSnap.data() || {};
+    const receiptIds = Array.isArray(userData.receipts)
+      ? userData.receipts.filter((x) => typeof x === "string")
+      : [];
 
-    const countSnap = await baseQuery.count().get();
-    const total = countSnap.data().count || 0;
-    const totalPages = Math.max(1, Math.ceil(total / pageSize));
+    if (receiptIds.length === 0) {
+      return res.status(200).json({ receipts: [] });
+    }
 
-    const snap = await baseQuery
-      .orderBy("createdAt", "desc")
-      .offset(offset)
-      .limit(pageSize)
-      .get();
+    
+    const chunk = (arr, size = 300) =>
+      Array.from({ length: Math.ceil(arr.length / size) }, (_, i) =>
+        arr.slice(i * size, i * size + size)
+      );
 
-    const receipts = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
+    
+    const allSnaps = [];
+    for (const ids of chunk(receiptIds, 300)) {
+      const refs = ids.map((id) => db.collection("receipts").doc(id));
+      const snaps = await db.getAll(...refs);
+      allSnaps.push(...snaps);
+    }
 
-    return res.status(200).json({
-      page,
-      pageSize,
-      total,
-      totalPages,
-      receipts,
-    });
-  } catch (err) {
-    console.error(err);
-    return res.status(500).json({ error: err?.message || "Unknown error" });
+    
+    const receipts = allSnaps
+      .filter((s) => s.exists)
+      .map((s) => {
+        const data = s.data() || {};
+        const createdAt =
+          data.createdAt?.toDate?.() instanceof Date
+            ? data.createdAt.toDate().toISOString()
+            : data.createdAt ?? null;
+
+        return {
+          id: s.id,
+          createdAt,
+          store: data.store ?? data.merchant ?? null,
+          total: data.total ?? null,
+        };
+      })
+      
+      .sort((a, b) => {
+        const ta = a.createdAt ? +new Date(a.createdAt) : 0;
+        const tb = b.createdAt ? +new Date(b.createdAt) : 0;
+        return tb - ta;
+      });
+
+    return res.status(200).json({ receipts });
+  } catch (error) {
+    console.error(error);
+    return res
+      .status(500)
+      .json({ error: error?.message || "Unknown error" });
   }
 });
 
-router.post('/assign-receipt', authenticate, requireBody, async(req, res) => {
-  try{
-    const {userid, receiptid, receipt} = req.body;
-    if(!userid || !receipt || !receiptid){
-      return res.status(400).send({
-        message: 'not all required fields are found.'
-      })
+
+
+
+
+router.post('/assign-receipt', authenticate, async (req, res) => {
+  try {
+    const { userid, receiptid, receipt } = req.body;
+
+    if (!userid || !receiptid || !receipt || !Array.isArray(receipt.items)) {
+      return res.status(400).send({ message: 'userid, receiptid, and receipt.items (array) are required.' });
     }
+
+    console.log(userid);
 
     const docRef = db.collection('receipts').doc(receiptid);
-    await docRef.update(receipt);
 
-    return res.status(200).send();
+    
+    await docRef.update({ items: receipt.items });
 
-  }catch(error){
+    return res.sendStatus(200);
+  } catch (error) {
     console.error(error);
-    return res.status(500).send({
-      message: error
-    })
+    return res.status(500).send({ message: String(error) });
   }
 });
-
-router.get('/get-per-person', authenticate, requireBody, async(req, res) => {
+router.post('/get-per-person', authenticate, requireBody, async(req, res) => {
   try{
-    const {userid, receiptid} = req.body;
-    if(!userid || !receiptid){
+    const { receiptid} = req.body;
+    if( !receiptid){
       return res.status(400).send({
         message: 'missing request form'
       })
@@ -206,7 +254,8 @@ router.get('/get-per-person', authenticate, requireBody, async(req, res) => {
         message: 'receipt not found!'
       })
     }
-    const t = calculate(receipt);
+    const t = calculate(receipt.data());
+    console.log(t);
     return res.status(200).send(t);
   }catch(error){
     console.error(error)
@@ -235,11 +284,11 @@ router.get('/get-per-person', authenticate, requireBody, async(req, res) => {
  * }}
  */
 const calculate = (receipt) => {
-  // --- Helpers ---
+  
   const toCents = (n) => Math.round((Number(n) || 0) * 100);
   const fromCents = (c) => Number((c / 100).toFixed(2));
 
-  // Normalize misc to cents
+  
   const miscTotalCents = toCents(
     (Array.isArray(receipt.miscellaneous) ? receipt.miscellaneous : []).reduce(
       (sum, m) => sum + (Number(m?.amount) || 0),
@@ -247,8 +296,8 @@ const calculate = (receipt) => {
     )
   );
 
-  // Build item lines and figure out per-person pre-tax subtotals (in cents)
-  const perPerson = {}; // person -> accumulator
+  
+  const perPerson = {}; 
   const ensurePerson = (name) => {
     const key = name ?? "_unassigned";
     if (!perPerson[key]) {
@@ -268,11 +317,11 @@ const calculate = (receipt) => {
   for (const item of items) {
     const qty = Number(item?.amount) || 0;
     const unit = Number(item?.price) || 0;
-    const baseLine = qty * unit; // pre-tax
+    const baseLine = qty * unit; 
     const baseLineCents = toCents(baseLine);
     if (baseLineCents === 0) continue;
 
-    // assignedTo can be string | array<string> | null/undefined
+    
     let assignees = item?.assignedTo;
     if (assignees == null || assignees === "") {
       assignees = ["_unassigned"];
@@ -283,7 +332,7 @@ const calculate = (receipt) => {
       assignees = [String(assignees)];
     }
 
-    // Split the line evenly across assignees (if multiple)
+    
     const shareEach = Math.floor(baseLineCents / assignees.length);
     let remainder = baseLineCents - shareEach * assignees.length;
 
@@ -306,7 +355,7 @@ const calculate = (receipt) => {
   const subtotalProvidedCents = toCents(receipt.subtotal);
   const totalProvidedCents = toCents(receipt.total);
 
-  // Compute pre-tax subtotal from items if not provided (or use provided if it matches)
+  
   const computedPreTaxSubtotalCents = Object.values(perPerson).reduce(
     (s, p) => s + p.preTaxSubtotalCents,
     0
@@ -317,14 +366,14 @@ const calculate = (receipt) => {
   const weightingSubtotalCents =
     computedPreTaxSubtotalCents > 0 ? computedPreTaxSubtotalCents : preTaxSubtotalCents;
 
-  // Distribute shared charges (tax, tip, misc) proportionally by pre-tax share
+  
   const sharedPools = [
     { key: "taxShareCents", amount: taxCents },
     { key: "tipShareCents", amount: tipCents },
     { key: "miscShareCents", amount: miscTotalCents },
   ];
 
-  // Prepare weights and handle zero-subtotal case
+  
   const people = Object.keys(perPerson).length ? Object.keys(perPerson) : [ensurePerson("_unassigned")];
   const weights = people.map((person) => {
     const w = perPerson[person].preTaxSubtotalCents;
@@ -333,30 +382,30 @@ const calculate = (receipt) => {
 
   const totalWeight = weights.reduce((s, w) => s + w.weight, 0);
 
-  // If no one has items (edge-case), allocate everything to _unassigned
+  
   if (totalWeight === 0) {
     const key = ensurePerson("_unassigned");
     perPerson[key].preTaxSubtotalCents = 0;
-    // all shared charges remain to be allocated below as zeros; we’ll set them directly
+    
     perPerson[key].taxShareCents = taxCents;
     perPerson[key].tipShareCents = tipCents;
     perPerson[key].miscShareCents = miscTotalCents;
   } else {
     for (const pool of sharedPools) {
-      // First pass: proportional allocation, floor to cents, track remainders
+      
       let allocated = 0;
       const remainders = [];
 
       for (const { person, weight } of weights) {
         const raw = (pool.amount * weight) / totalWeight;
-        const cents = Math.floor(raw); // floor
+        const cents = Math.floor(raw); 
         const rem = raw - cents;
         perPerson[person][pool.key] += cents;
         allocated += cents;
         remainders.push({ person, rem });
       }
 
-      // Distribute leftover pennies by largest remainders
+      
       let leftover = pool.amount - allocated;
       remainders
         .sort((a, b) => b.rem - a.rem)
@@ -367,7 +416,7 @@ const calculate = (receipt) => {
     }
   }
 
-  // Compute per-person totals (cents)
+  
   let sumOfPeopleCents = 0;
   for (const person of Object.keys(perPerson)) {
     const p = perPerson[person];
@@ -401,7 +450,7 @@ const calculate = (receipt) => {
     sumOfPeopleCents = Object.values(perPerson).reduce((s, p) => s + p.totalOwedCents, 0);
   }
 
-  // Build final, pretty output
+  
   const pretty = {};
   for (const [person, p] of Object.entries(perPerson)) {
     pretty[person] = {
@@ -423,6 +472,66 @@ const calculate = (receipt) => {
     },
   };
 };
+
+router.get("/getbyid", async (req, res) => {
+  try {
+    const id = req.query.id || req.query.receiptId;
+    if (!id) {
+      return res.status(400).json({ error: "Missing required query param: id" });
+    }
+
+    const docRef = db.collection("receipts").doc(id);
+    const snap = await docRef.get();
+
+    if (!snap.exists) {
+      return res.status(404).json({ error: "Receipt not found" });
+    }
+
+    const result = snap.data() || {};
+
+    
+    const items = Array.isArray(result.items) ? result.items : [];
+    const firstItem = items[0];
+    const firstItemHasAssignee =
+      !!firstItem &&
+      (
+        (Array.isArray(firstItem.people) && firstItem.people.length > 0) ||
+        (Array.isArray(firstItem.assignees) && firstItem.assignees.length > 0) ||
+        (Array.isArray(firstItem.assignedTo) && firstItem.assignedTo.length > 0) ||
+        !!firstItem.person
+      );
+
+    let perperson = {};
+    if (firstItemHasAssignee) {
+      const calc = await Promise.resolve(calculate(result)); 
+
+      
+      perperson = (calc && calc.perPerson) ? calc.perPerson : calc || {};
+
+      
+      if (calc && calc.check) {
+        result.check = calc.check;
+      }
+
+      
+      result.perperson = perperson;
+    } else {
+      
+      delete result.perperson;
+      delete result.check;
+    }
+
+    return res.status(200).json({
+      id: snap.id,
+      result,     
+      perperson,  
+    });
+  } catch (err) {
+    console.error("GET /getbyid error:", err);
+    return res.status(500).json({ error: err?.message || "Internal server error" });
+  }
+});
+
 
 
 module.exports = router

@@ -73,7 +73,7 @@ router.post('/create-account', async(req, res) => {
             username, email, password, name, phoneNumber
         } = req.body;
 
-        if(!username || !email || !password || !name || !phoneNumber || password.length <= 8) {
+        if(!username || !email || !password || !name || !phoneNumber || password.length < 8) {
             return res.status(400).send({
                 message: 'incomplete form!'
             })
@@ -126,6 +126,8 @@ router.post('/login', async(req, res) => {
     }
     const {password, email, username} = req.body;
 
+    console.log(password)
+
     if(email.length == 0 && username == 0){
         return res.status(400).send({
             message: 'no login credentials given'
@@ -160,6 +162,7 @@ router.post('/login', async(req, res) => {
             return res.status(200).send({
                 token: token,
                 refreshToken: refreshToken,
+                id: snap.docs[0].id,
             })
         }else{
             return res.status(404).send({
@@ -215,4 +218,30 @@ router.get('/protected', authenticate, async(req, res) => {
     })
 })
 
+router.post('/logout', authenticate, async(req, res) => {
+    try{
+        const {refreshToken} = req.body();
+        if(!refreshToken){
+            return res.status(400).send({
+                message: 'no refresh token was given'
+            })
+        }
+
+        const authInstance = await  db.collection('auth').doc(refreshToken).get();
+        if(!authInstance){
+            return res.status(404).send({
+                message: 'session not found'
+            })
+        }
+        else {
+            await db.collection('auth').doc(refreshToken).delete();
+            return res.status(200).send();
+        }
+    }catch(error){
+        res.status(500).send({
+            message: 'something went wrong logging you out'
+        })
+    }
+
+})
 module.exports = router
