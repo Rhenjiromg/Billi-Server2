@@ -473,7 +473,7 @@ const calculate = (receipt) => {
   };
 };
 
-router.get("/getbyid", async (req, res) => {
+router.get("/getbyid", authenticate, async (req, res) => {
   try {
     const id = req.query.id || req.query.receiptId;
     if (!id) {

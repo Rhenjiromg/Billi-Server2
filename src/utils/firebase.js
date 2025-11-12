@@ -1,11 +1,14 @@
+
+
 import admin from 'firebase-admin'
+
 import dotenv from 'dotenv';
-import serviceAccount from '../../ADMIN_CERT.json' assert { type: 'json' };
+
 
 dotenv.config();
 
-export const ad = admin.initializeApp({
-    credential: admin.credential.cert(serviceAccount),
+admin.initializeApp({
+    credential: admin.credential.applicationDefault(),
     storageBucket: process.env.BUCKET
   });
 
