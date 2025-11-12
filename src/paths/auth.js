@@ -62,6 +62,10 @@ const hashPassword = async(password) => {
     return await bcrypt.hash(password, 10);
 }
 
+const hashToken = async(token) => {
+    return await bcrypt.hash(token, 10);
+}
+
 router.post('/create-account', async(req, res) => {
     try{
         if(!req || !req.body){
@@ -89,6 +93,7 @@ router.post('/create-account', async(req, res) => {
             isActive: true, 
             friends: [], 
             receipts: [], 
+            receiptCount: 0,
         }
 
         const valid = await checkValidity(username, email);
@@ -220,28 +225,31 @@ router.get('/protected', authenticate, async(req, res) => {
 
 router.post('/logout', authenticate, async(req, res) => {
     try{
-        const {refreshToken} = req.body();
+        const {refreshToken} = req.body;
         if(!refreshToken){
             return res.status(400).send({
                 message: 'no refresh token was given'
             })
         }
 
-        const authInstance = await  db.collection('auth').doc(refreshToken).get();
+        const authInstance = await  db.collection("auth").doc(refreshToken).get();
         if(!authInstance){
             return res.status(404).send({
                 message: 'session not found'
             })
         }
         else {
-            await db.collection('auth').doc(refreshToken).delete();
-            return res.status(200).send();
+            await db.collection("auth").doc(refreshToken).delete();
+            return res.status(200).send({
+                message: 'logged out'
+            });
         }
     }catch(error){
-        res.status(500).send({
+        console.error(error);
+        return res.status(500).send({
             message: 'something went wrong logging you out'
         })
     }
-
 })
+
 module.exports = router
