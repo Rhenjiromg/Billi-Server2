@@ -62,12 +62,13 @@ router.post("/new-receipt",authenticate, upload.single("image"), async (req, res
 const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
 
 const RECEIPT_PROMPT = `
-You are a receipt analyzer AI. Please extract the following JSON structure from this image:
+You are a receipt analyzer AI. Please extract the following JSON structure from this image.
+If there are multiple of each items, create multiple instances of the item to match. 
+For example, if the receipt has 3 burgers, create 3 items named burgers, and decide if the price listed is for one of them or for all 3, and assign the price appropriately
 
 {
   "items": [{"name": string, 
-  "price": number, 
-  "amount": number, 
+  "price": number,  
   "individualPrice":number, 
   "priceAfterTax": number, 
   "priceAfterTaxAndGratuity":number, 
@@ -269,11 +270,11 @@ router.post('/get-per-person', authenticate, requireBody, async(req, res) => {
 })
 
 const calculate = (receipt) => {
-  // -------- helpers --------
+  
   const toCents = (n) => Math.round((Number(n) || 0) * 100);
   const fromCents = (c) => Number((c / 100).toFixed(2));
 
-  // Sum of simple miscellaneous (no split modes yet)
+  
   const miscTotalCents = toCents(
     (Array.isArray(receipt.miscellaneous) ? receipt.miscellaneous : []).reduce(
       (sum, m) => sum + (Number(m?.amount) || 0),
@@ -281,10 +282,10 @@ const calculate = (receipt) => {
     )
   );
 
-  // Per-person accumulator
-  const perPerson = {};
-  const ensurePerson = (nameOrId) => {
-    const key = nameOrId ?? "_unassigned";
+  
+  const perPerson = {}; 
+  const ensurePerson = (name) => {
+    const key = name ?? "_unassigned";
     if (!perPerson[key]) {
       perPerson[key] = {
         items: [],
@@ -298,100 +299,49 @@ const calculate = (receipt) => {
     return key;
   };
 
-  // -------- per-item allocation by quantity --------
   const items = Array.isArray(receipt.items) ? receipt.items : [];
-
   for (const item of items) {
-    const amount = Number(item?.amount) || 0; // total qty of the item
-    // Prefer individualPrice when present; otherwise treat price as unit price (your current approach)
-    const unitPrice = Number(
-      item?.individualPrice != null ? item.individualPrice : item?.price
-    ) || 0;
+    const qty = Number(item?.amount) || 0;
+    const unit = Number(item?.price) || 0;
+    const baseLine = qty * unit; 
+    const baseLineCents = toCents(baseLine);
+    if (baseLineCents === 0) continue;
 
-    const lineTotalCents = toCents(amount * unitPrice);
-    if (lineTotalCents === 0 || amount <= 0) continue;
-
-    // --- Gather allocations ---
-    // Preferred: item.allocations = [{ personId: string, qty: number }]
-    let allocs = Array.isArray(item?.allocations)
-      ? item.allocations
-          .filter(a => a && (typeof a.personId === "string" || typeof a.personId === "number"))
-          .map(a => ({ personId: String(a.personId), qty: Number(a.qty) || 0 }))
-      : null;
-
-    // Back-compat: if no allocations, fall back to assignedTo (split quantity evenly)
-    if (!allocs || allocs.length === 0) {
-      let assignees = item?.assignedTo;
-      if (assignees == null || assignees === "") {
-        assignees = ["_unassigned"];
-      } else if (Array.isArray(assignees)) {
-        assignees = assignees.filter(Boolean);
-        if (assignees.length === 0) assignees = ["_unassigned"];
-      } else {
-        assignees = [String(assignees)];
-      }
-      const evenQty = assignees.length > 0 ? amount / assignees.length : amount;
-      allocs = assignees.map(personId => ({ personId: String(personId), qty: evenQty }));
-    }
-
-    // Clean + normalize allocations
-    // Clamp negatives, sum qty, and scale if users over-allocated
-    allocs = allocs.map(a => ({ ...a, qty: Math.max(0, a.qty) }));
-    const sumQty = allocs.reduce((s, a) => s + a.qty, 0);
-
-    if (sumQty === 0) {
-      // Nothing explicitly allocated: send all to _unassigned
-      allocs = [{ personId: "_unassigned", qty: amount }];
+    
+    let assignees = item?.assignedTo;
+    if (assignees == null || assignees === "") {
+      assignees = ["_unassigned"];
+    } else if (Array.isArray(assignees)) {
+      assignees = assignees.filter(Boolean);
+      if (assignees.length === 0) assignees = ["_unassigned"];
     } else {
-      // If over-allocated, scale down proportionally to fit `amount`
-      const scale = Math.min(1, amount / sumQty);
-      allocs = allocs.map(a => ({ ...a, qty: +(a.qty * scale) }));
-      // If under-allocated, put the remainder to _unassigned to keep totals consistent
-      const scaledQtySum = allocs.reduce((s, a) => s + a.qty, 0);
-      const remainderQty = Math.max(0, +(amount - scaledQtySum));
-      if (remainderQty > 0.000001) {
-        // Push remainder as its own allocation
-        allocs.push({ personId: "_unassigned", qty: remainderQty });
-      }
+      assignees = [String(assignees)];
     }
 
-    // --- Convert qty allocations to cents with largest remainders to hit exact line total ---
-    const raw = allocs.map(({ personId, qty }) => {
-      const shareFloat = qty * unitPrice; // dollars
-      const shareCentsFloat = shareFloat * 100;
-      const centsFloor = Math.floor(shareCentsFloat);
-      const remainder = shareCentsFloat - centsFloor;
-      return { personId, qty, centsFloor, remainder };
-    });
+    
+    const shareEach = Math.floor(baseLineCents / assignees.length);
+    let remainder = baseLineCents - shareEach * assignees.length;
 
-    const centsAllocated = raw.reduce((s, r) => s + r.centsFloor, 0);
-    let leftover = lineTotalCents - centsAllocated;
-    // Distribute leftover pennies to largest fractional remainders
-    raw
-      .slice()
-      .sort((a, b) => b.remainder - a.remainder)
-      .slice(0, leftover)
-      .forEach(r => (r.centsFloor += 1));
+    assignees.forEach((person, idx) => {
+      const key = ensurePerson(person);
+      const add = shareEach + (remainder > 0 ? 1 : 0);
+      if (remainder > 0) remainder -= 1;
 
-    // --- Commit per-person item shares ---
-    for (const r of raw) {
-      const key = ensurePerson(r.personId);
-      perPerson[key].preTaxSubtotalCents += r.centsFloor;
+      perPerson[key].preTaxSubtotalCents += add;
       perPerson[key].items.push({
         name: item?.name ?? "Item",
-        qty: Number(r.qty.toFixed(2)),
-        unitPrice: fromCents(toCents(unitPrice)), // normalized to 2dp
-        lineTotal: fromCents(r.centsFloor),
+        qty,
+        lineTotal: fromCents(add),
       });
-    }
+    });
   }
 
-  // -------- shared pools: tax, tip, misc --------
   const taxCents = toCents(receipt.tax);
   const tipCents = toCents(receipt.tip);
   const subtotalProvidedCents = toCents(receipt.subtotal);
   const totalProvidedCents = toCents(receipt.total);
 
+  
   const computedPreTaxSubtotalCents = Object.values(perPerson).reduce(
     (s, p) => s + p.preTaxSubtotalCents,
     0
@@ -399,18 +349,18 @@ const calculate = (receipt) => {
   const preTaxSubtotalCents =
     subtotalProvidedCents > 0 ? subtotalProvidedCents : computedPreTaxSubtotalCents;
 
-  // Pools to distribute proportionally by pre-tax subtotals
+  const weightingSubtotalCents =
+    computedPreTaxSubtotalCents > 0 ? computedPreTaxSubtotalCents : preTaxSubtotalCents;
+
+  
   const sharedPools = [
     { key: "taxShareCents", amount: taxCents },
     { key: "tipShareCents", amount: tipCents },
     { key: "miscShareCents", amount: miscTotalCents },
   ];
 
-  // Build weights
-  const people = Object.keys(perPerson).length
-    ? Object.keys(perPerson)
-    : [ensurePerson("_unassigned")];
-
+  
+  const people = Object.keys(perPerson).length ? Object.keys(perPerson) : [ensurePerson("_unassigned")];
   const weights = people.map((person) => {
     const w = perPerson[person].preTaxSubtotalCents;
     return { person, weight: w };
@@ -418,27 +368,30 @@ const calculate = (receipt) => {
 
   const totalWeight = weights.reduce((s, w) => s + w.weight, 0);
 
+  
   if (totalWeight === 0) {
-    // No items allocated — give all shared pools to _unassigned
     const key = ensurePerson("_unassigned");
     perPerson[key].preTaxSubtotalCents = 0;
+    
     perPerson[key].taxShareCents = taxCents;
     perPerson[key].tipShareCents = tipCents;
     perPerson[key].miscShareCents = miscTotalCents;
   } else {
     for (const pool of sharedPools) {
+      
       let allocated = 0;
       const remainders = [];
 
       for (const { person, weight } of weights) {
         const raw = (pool.amount * weight) / totalWeight;
-        const cents = Math.floor(raw);
+        const cents = Math.floor(raw); 
         const rem = raw - cents;
         perPerson[person][pool.key] += cents;
         allocated += cents;
         remainders.push({ person, rem });
       }
 
+      
       let leftover = pool.amount - allocated;
       remainders
         .sort((a, b) => b.rem - a.rem)
@@ -449,26 +402,24 @@ const calculate = (receipt) => {
     }
   }
 
-  // -------- totals & final reconciliation --------
+  
   let sumOfPeopleCents = 0;
   for (const person of Object.keys(perPerson)) {
     const p = perPerson[person];
-    p.totalOwedCents =
-      p.preTaxSubtotalCents + p.taxShareCents + p.tipShareCents + p.miscShareCents;
+    p.totalOwedCents = p.preTaxSubtotalCents + p.taxShareCents + p.tipShareCents + p.miscShareCents;
     sumOfPeopleCents += p.totalOwedCents;
   }
 
   const inferredTotalCents =
     preTaxSubtotalCents + taxCents + tipCents + miscTotalCents;
-  const targetTotalCents =
-    totalProvidedCents > 0 ? totalProvidedCents : inferredTotalCents;
+  const targetTotalCents = totalProvidedCents > 0 ? totalProvidedCents : inferredTotalCents;
 
-  // Reconcile rounding drift to match receipt total
-  let diff = targetTotalCents - sumOfPeopleCents; // positive means we need to add pennies
+  let diff = targetTotalCents - sumOfPeopleCents; 
   if (diff !== 0) {
     const order = Object.keys(perPerson)
       .map((person) => {
         const w = perPerson[person].preTaxSubtotalCents;
+        const frac = w - Math.floor(w); 
         const prop = totalWeight ? w / totalWeight : 0;
         return { person, prop };
       })
@@ -485,7 +436,7 @@ const calculate = (receipt) => {
     sumOfPeopleCents = Object.values(perPerson).reduce((s, p) => s + p.totalOwedCents, 0);
   }
 
-  // -------- pretty output --------
+  
   const pretty = {};
   for (const [person, p] of Object.entries(perPerson)) {
     pretty[person] = {
