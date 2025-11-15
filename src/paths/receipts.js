@@ -296,7 +296,7 @@ const calculate = (receipt) => {
   for (const item of items) {
     const qty = Number(item?.amount) || 0;
     const unit = Number(item?.price) || 0;
-    const baseLine = qty * unit; 
+    const baseLine = unit; 
     const baseLineCents = toCents(baseLine);
     if (baseLineCents === 0) continue;
 
