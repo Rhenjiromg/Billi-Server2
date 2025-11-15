@@ -62,18 +62,10 @@ router.post("/new-receipt",authenticate, upload.single("image"), async (req, res
 const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
 
 const RECEIPT_PROMPT = `
-You are a receipt analyzer AI. Please extract the following JSON structure from this image.
-If there are multiple of each items, create multiple instances of the item to match. 
-For example, if the receipt has 3 burgers, create 3 items named burgers, and decide if the price listed is for one of them or for all 3, and assign the price appropriately
+You are a receipt analyzer AI. Please extract the following JSON structure from this image:
 
 {
-  "items": [{"name": string, 
-  "price": number,  
-  "individualPrice":number, 
-  "priceAfterTax": number, 
-  "priceAfterTaxAndGratuity":number, 
-  "assignedTo": null
-  }],
+  "items": [{"name": string, "price": number, "amount": number, "individualPrice":number, "priceAfterTax": number, "priceAfterTaxAndGratuity":number, "assignedTo": null}],
   "subtotal": number,
   "miscellaneous": [{"amount": number, "description": string}],
   "tax": number,
@@ -85,6 +77,7 @@ For example, if the receipt has 3 burgers, create 3 items named burgers, and dec
 }
 Return ONLY the JSON structure.
 `;
+
 
 /**
  * Accepts a local file path, Buffer, or a Web File/Blob.
